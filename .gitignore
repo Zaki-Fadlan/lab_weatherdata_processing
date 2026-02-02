@@ -1,3 +1,11 @@
 venv
 output
 grib_139_steps
+*.grib2
+*.nc
+*zarr
+*.idx
+*.dat
+*.npy
+.env
+*.csv
