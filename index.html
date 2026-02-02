@@ -1,0 +1,548 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <title>Binary Weather Visualization</title>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <style>
+        body,
+        html {
+            margin: 0;
+            padding: 0;
+            height: 100%;
+            font-family: 'Segoe UI', sans-serif;
+        }
+
+        #map {
+            width: 100%;
+            height: 100%;
+            background: #1a1a1a;
+        }
+
+        .info-box {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            background: rgba(30, 30, 30, 0.9);
+            color: #fff;
+            padding: 15px;
+            border-radius: 8px;
+            z-index: 1000;
+            min-width: 220px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+            backdrop-filter: blur(5px);
+        }
+
+        .legend {
+            position: absolute;
+            bottom: 30px;
+            right: 20px;
+            background: rgba(30, 30, 30, 0.9);
+            color: #fff;
+            padding: 10px;
+            border-radius: 8px;
+            z-index: 1000;
+            font-size: 12px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+            backdrop-filter: blur(5px);
+            width: 300px;
+            /* Wider for gradient bar */
+        }
+
+        /* Continuous Gradient Legend */
+        .legend-gradient {
+            width: 100%;
+            height: 15px;
+            background: linear-gradient(to right,
+                    rgba(150, 150, 150, 0) 0%,
+                    rgba(180, 180, 180, 0.8) 2%,
+                    rgba(255, 255, 255, 1) 5%,
+                    rgba(100, 150, 255, 1) 15%,
+                    rgba(0, 200, 0, 1) 25%,
+                    rgba(255, 255, 0, 1) 40%,
+                    rgba(255, 128, 0, 1) 55%,
+                    rgba(255, 0, 0, 1) 70%,
+                    rgba(255, 0, 255, 1) 85%,
+                    rgba(128, 0, 128, 1) 95%,
+                    rgba(255, 255, 255, 1) 100%);
+            border-radius: 3px;
+            margin-bottom: 5px;
+        }
+
+        .legend-labels {
+            display: flex;
+            justify-content: space-between;
+            width: 100%;
+            color: #ccc;
+        }
+
+        .legend-title {
+            margin-bottom: 8px;
+            font-weight: bold;
+            display: block;
+        }
+
+        h3 {
+            margin-top: 0;
+            font-size: 16px;
+            border-bottom: 1px solid #444;
+            padding-bottom: 8px;
+        }
+    </style>
+</head>
+
+<body>
+    <div id="map"></div>
+    <div class="info-box">
+        <h3>Weather Visualizer</h3>
+        <div id="inspector">Loading...</div>
+    </div>
+
+    <div class="legend">
+        <span class="legend-title">Precipitation (mm)</span>
+        <div class="legend-gradient"></div>
+        <div class="legend-labels">
+            <span>0</span>
+            <span>50</span>
+            <span>100</span>
+            <span>150</span>
+            <span>200</span>
+            <span>250+</span>
+        </div>
+    </div>
+
+    <div class="controls">
+        <button id="playBtn" onclick="togglePlay()">▶</button>
+        <input type="range" id="timeSlider" min="0" max="0" value="0" oninput="seek(this.value)">
+        <div id="timeDisplay">Loading Timeline...</div>
+    </div>
+
+    <style>
+        .controls {
+            position: absolute;
+            bottom: 30px;
+            left: 20px;
+            right: 340px;
+            /* Space for wide legend */
+            background: rgba(30, 30, 30, 0.9);
+            padding: 15px;
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            gap: 15px;
+            color: white;
+            z-index: 1000;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+            backdrop-filter: blur(5px);
+        }
+
+        #playBtn {
+            background: #0096FF;
+            border: none;
+            color: white;
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            cursor: pointer;
+            font-size: 18px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        #playBtn:hover {
+            background: #007acc;
+        }
+
+        #timeSlider {
+            flex-grow: 1;
+            cursor: pointer;
+        }
+
+        #timeDisplay {
+            min-width: 150px;
+            font-family: monospace;
+            font-size: 14px;
+        }
+    </style>
+
+    <!-- WebGL Shaders -->
+    <script id="vshader" type="x-shader/x-vertex">
+        attribute vec2 a_position;
+        varying vec2 v_texCoord;
+        void main() {
+            // Map -1..1 to 0..1 for texture coords
+            v_texCoord = a_position * 0.5 + 0.5;
+            // Invert Y for texture convention if needed, or handle in JS
+            v_texCoord.y = 1.0 - v_texCoord.y; 
+            gl_Position = vec4(a_position, 0.0, 1.0);
+        }
+    </script>
+
+    <script id="fshader" type="x-shader/x-fragment">
+        precision mediump float;
+        varying vec2 v_texCoord;
+        
+        uniform sampler2D u_dataTexture; 
+        uniform sampler2D u_rampTexture;
+        uniform float u_min;
+        uniform float u_max;
+        uniform vec2 u_texSize; 
+
+        // Multi-Tap Gaussian Sampling
+        // We leverage hardware LINEAR filtering to get 4 samples per tap, 
+        // effectively sampling a large area very smoothly.
+        float sampleSmooth(sampler2D sampler, vec2 uv) {
+            vec2 offset = 1.0 / u_texSize;
+            
+            float val = 0.0;
+            // 9-tap Gaussian (weighted)
+            val += texture2D(sampler, uv).r * 0.25;
+            
+            val += texture2D(sampler, uv + vec2(offset.x, 0.0)).r * 0.125;
+            val += texture2D(sampler, uv - vec2(offset.x, 0.0)).r * 0.125;
+            val += texture2D(sampler, uv + vec2(0.0, offset.y)).r * 0.125;
+            val += texture2D(sampler, uv - vec2(0.0, offset.y)).r * 0.125;
+            
+            val += texture2D(sampler, uv + offset).r * 0.0625;
+            val += texture2D(sampler, uv - offset).r * 0.0625;
+            val += texture2D(sampler, uv + vec2(offset.x, -offset.y)).r * 0.0625;
+            val += texture2D(sampler, uv + vec2(-offset.x, offset.y)).r * 0.0625;
+            
+            return val;
+        }
+
+        void main() {
+            // 1. Get Multi-interpolated Smooth Value
+            float valNorm = sampleSmooth(u_dataTexture, v_texCoord);
+            
+            // 2. Decode
+            float val = valNorm * (u_max - u_min) + u_min;
+            
+            // 3. Spire-Specific Alpha Contouring
+            // We want a very soft but defined edge. 
+            // Any value above 0.1 starts appearing.
+            float alpha = smoothstep(0.05, 0.5, val); // Thicker, rounds out the blobs
+            
+            // 4. Map to Color Ramp
+            float rampPos = clamp(val / 254.0, 0.0, 1.0);
+            vec4 color = texture2D(u_rampTexture, vec2(rampPos, 0.5));
+            
+            // Apply the contoured alpha
+            gl_FragColor = vec4(color.rgb, color.a * alpha);
+        }
+    </script>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script>
+        var map = L.map('map').setView([-2.0, 110.0], 5);
+
+        L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
+            attribution: '&copy; OpenStreetMap &copy; CARTO',
+            maxZoom: 19
+        }).addTo(map);
+
+        L.CanvasLayer = L.Layer.extend({
+            onAdd: function (map) {
+                this._map = map;
+
+                // Main Map Canvas (2D) for final display
+                this._canvas = L.DomUtil.create('canvas', 'leaflet-layer');
+                this._canvas.style.pointerEvents = 'none';
+                map.getPanes().overlayPane.appendChild(this._canvas);
+
+                // Offscreen WebGL Canvas (High Res Renderer)
+                this._glCanvas = document.createElement('canvas');
+                // Set resolution high enough for smooth gradients (e.g. 1024 or 2048)
+                this._glCanvas.width = 2048; // Increased for crisper edges
+                this._glCanvas.height = 2048;
+                this._initWebGL();
+
+                this._updateSize();
+                map.on('moveend', this._update, this);
+                map.on('zoomend', this._update, this);
+                map.on('resize', this._resize, this);
+
+                this._initAnimation();
+            },
+
+            _initWebGL: function () {
+                var gl = this._glCanvas.getContext('webgl', { alpha: true, premultipliedAlpha: false });
+                this._gl = gl;
+
+                if (!gl) { console.error("WebGL not supported"); return; }
+
+                // Compile Shaders
+                var vsSource = document.getElementById('vshader').text;
+                var fsSource = document.getElementById('fshader').text;
+
+                var vs = this._compileShader(gl, gl.VERTEX_SHADER, vsSource);
+                var fs = this._compileShader(gl, gl.FRAGMENT_SHADER, fsSource);
+
+                var program = gl.createProgram();
+                gl.attachShader(program, vs);
+                gl.attachShader(program, fs);
+                gl.linkProgram(program);
+                gl.useProgram(program);
+                this._program = program;
+
+                // Setup Quad (Full Screen)
+                var buffer = gl.createBuffer();
+                gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+                gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
+                    -1, -1,
+                    1, -1,
+                    -1, 1,
+                    1, 1,
+                ]), gl.STATIC_DRAW);
+
+                var a_pos = gl.getAttribLocation(program, "a_position");
+                gl.enableVertexAttribArray(a_pos);
+                gl.vertexAttribPointer(a_pos, 2, gl.FLOAT, false, 0, 0);
+
+                // Setup Uniforms
+                this._uData = gl.getUniformLocation(program, "u_dataTexture");
+                this._uRamp = gl.getUniformLocation(program, "u_rampTexture");
+                this._uMin = gl.getUniformLocation(program, "u_min");
+                this._uMax = gl.getUniformLocation(program, "u_max");
+                this._uTexSize = gl.getUniformLocation(program, "u_texSize");
+
+                // Generate Ramp Texture (0-254mm)
+                this._createRampTexture(gl);
+
+                // Placeholder Data Texture
+                this._dataTex = gl.createTexture();
+                gl.activeTexture(gl.TEXTURE0);
+                gl.bindTexture(gl.TEXTURE_2D, this._dataTex);
+                // We typically use Nearest for Bicubic manual fetch, OR Linear.
+                // Using Nearest ensures we get the raw values to interpolate ourselves.
+                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+
+                // Set Units
+                gl.uniform1i(this._uData, 0); // Unit 0
+                gl.uniform1i(this._uRamp, 1); // Unit 1
+            },
+
+            _compileShader: function (gl, type, source) {
+                var s = gl.createShader(type);
+                gl.shaderSource(s, source);
+                gl.compileShader(s);
+                if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
+                    console.error("Shader Compile Error:", gl.getShaderInfoLog(s));
+                }
+                return s;
+            },
+
+            _createRampTexture: function (gl) {
+                // Create a 256x1 canvas to draw the gradient
+                var c = document.createElement('canvas');
+                c.width = 256;
+                c.height = 1;
+                var ctx = c.getContext('2d');
+
+                // Create Gradient (0 to 256px represents 0 to 254mm)
+                var grd = ctx.createLinearGradient(0, 0, 256, 0);
+
+                // Color Stops based on Spire Reference (Values are mm)
+                // Normalize to 0.0 - 1.0 (where 1.0 = 254mm)
+                function norm(val) { return val / 254.0; }
+
+                grd.addColorStop(norm(0), "rgba(150,150,150,0)"); // Transparent Start
+                grd.addColorStop(norm(0.01), "rgba(180,180,180,0.8)"); // Grey Mist
+                grd.addColorStop(norm(0.8), "rgba(255,255,255,1)");   // White
+                grd.addColorStop(norm(2.0), "rgba(100,150,255,0.7)"); // Light Blue
+                grd.addColorStop(norm(25.0), "rgba(0,200,0,0.7)");     // Green
+                grd.addColorStop(norm(50.8), "rgba(255,255,0,0.7)");   // Yellow
+                grd.addColorStop(norm(76.2), "rgba(255,128,0,0.7)");   // Orange
+                grd.addColorStop(norm(101.6), "rgba(255,0,0,0.7)");    // Red
+                grd.addColorStop(norm(152.4), "rgba(255,0,255,0.7)");  // Magenta
+                grd.addColorStop(norm(203.2), "rgba(128,0,128,0.7)");  // Purple
+                grd.addColorStop(norm(254.0), "rgba(255,255,255,0.5)");// White
+
+                ctx.fillStyle = grd;
+                ctx.fillRect(0, 0, 256, 1);
+
+                var imgData = ctx.getImageData(0, 0, 256, 1);
+
+                var tex = gl.createTexture();
+                gl.activeTexture(gl.TEXTURE1);
+                gl.bindTexture(gl.TEXTURE_2D, tex);
+                gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, imgData);
+                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+            },
+
+            _updateSize: function () {
+                var size = this._map.getSize();
+                this._canvas.width = size.x;
+                this._canvas.height = size.y;
+            },
+
+            _resize: function () {
+                this._updateSize();
+                this._update();
+            },
+
+            _initAnimation: function () {
+                console.log("Initializing Animation (WebGL Enabled)...");
+
+                fetch('output/manifest.json')
+                    .then(r => r.json())
+                    .then(manifest => {
+                        window.weatherManifest = manifest;
+                        this._meta = manifest.grid;
+                        this._frames = manifest.frames;
+
+                        var slider = document.getElementById('timeSlider');
+                        slider.max = this._frames.length - 1;
+                        slider.value = 0;
+
+                        this._loadFrame(0);
+                    })
+                    .catch(e => {
+                        console.error("Error loading manifest:", e);
+                        document.getElementById('inspector').innerText = "Process pending.";
+                    });
+            },
+
+            _loadFrame: function (index) {
+                if (!window.weatherManifest) return;
+                var frame = this._frames[index];
+                if (!frame) return;
+
+                // Update UI Time
+                var date = new Date("2026-01-31T12:00:00Z");
+                date.setHours(date.getHours() + frame.hour);
+                document.getElementById('timeDisplay').innerText = date.toLocaleString();
+
+                var img = new Image();
+                img.onload = () => {
+                    // Update WebGL Uniforms
+                    var gl = this._gl;
+                    gl.useProgram(this._program);
+
+                    gl.uniform1f(this._uMin, frame.min);
+                    gl.uniform1f(this._uMax, frame.max);
+                    // Pass current texture size
+                    gl.uniform2f(this._uTexSize, img.width, img.height);
+
+                    gl.activeTexture(gl.TEXTURE0);
+                    gl.bindTexture(gl.TEXTURE_2D, this._dataTex);
+
+                    // Upload Image
+                    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+                    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB, gl.RGB, gl.UNSIGNED_BYTE, img);
+
+                    // Render
+                    gl.viewport(0, 0, this._glCanvas.width, this._glCanvas.height);
+                    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+                    // Trigger Map
+                    this._update();
+                };
+                img.src = 'output/' + frame.file;
+
+                // Store frame min/max/img for inspector later if needed
+                this._currentFrame = frame;
+                this._currentImg = img;
+            },
+
+            _update: function () {
+                // Draw the WebGL Canvas onto the Map Canvas with correct geopositioning
+                if (!this._meta) return;
+
+                var ctx = this._canvas.getContext('2d');
+                ctx.clearRect(0, 0, this._canvas.width, this._canvas.height);
+
+                // Reposition logic (same as before)
+                var topLeft = this._map.containerPointToLayerPoint([0, 0]);
+                L.DomUtil.setPosition(this._canvas, topLeft);
+
+                var lats = this._meta.lats;
+                var lons = this._meta.lons;
+                var width = this._meta.width;
+                var height = this._meta.height;
+
+                var latSpan = Math.abs(lats[0] - lats[height - 1]);
+                var lonSpan = Math.abs(lons[width - 1] - lons[0]);
+                var dLat = latSpan / (height > 1 ? height - 1 : 1);
+                var dLon = lonSpan / (width > 1 ? width - 1 : 1);
+
+                var north = lats[0] + (dLat / 2);
+                var south = lats[height - 1] - (dLat / 2);
+                var west = lons[0] - (dLon / 2);
+                var east = lons[width - 1] + (dLon / 2);
+
+                var pNW = this._map.latLngToContainerPoint([north, west]);
+                var pSE = this._map.latLngToContainerPoint([south, east]);
+
+                var w = pSE.x - pNW.x;
+                var h = pSE.y - pNW.y;
+
+                // Draw the high-res WebGL output
+                // Enable smoothing on the 2D canvas too, just in case
+                ctx.imageSmoothingEnabled = true;
+                ctx.drawImage(this._glCanvas, pNW.x, pNW.y, w, h);
+            },
+
+            _initInteraction: function () {
+                // Re-implementing interaction would require reading pixels or keeping the Float32Array
+                // For now, simpler to just say "Color Inspection" or approximate
+                // Or keep the old _data loading logic JUST for inspection in parallel?
+                // Let's implement that if user asks. For now, visual priority.
+
+                this._map.on('mousemove', (e) => {
+                    var div = document.getElementById('inspector');
+                    div.innerHTML = "Visual Mode (Inspector Paused)";
+                });
+            }
+        });
+
+        map.addLayer(new L.CanvasLayer());
+
+        // Animation Controls
+        var isPlaying = false;
+        var animInterval = null;
+        var currentIndex = 0;
+
+        function togglePlay() {
+            var layer = null;
+            map.eachLayer(l => { if (l._initAnimation) layer = l; });
+
+            if (isPlaying) {
+                clearInterval(animInterval);
+                document.getElementById('playBtn').innerText = "▶";
+                isPlaying = false;
+            } else {
+                if (!layer || !layer._frames) return;
+
+                document.getElementById('playBtn').innerText = "⏸";
+                isPlaying = true;
+
+                animInterval = setInterval(() => {
+                    currentIndex++;
+                    if (currentIndex >= layer._frames.length) currentIndex = 0;
+
+                    document.getElementById('timeSlider').value = currentIndex;
+                    layer._loadFrame(currentIndex);
+                }, 100);
+            }
+        }
+
+        function seek(val) {
+            currentIndex = parseInt(val);
+            map.eachLayer(l => {
+                if (l._loadFrame) l._loadFrame(currentIndex);
+            });
+        }
+    </script>
+</body>
+
+</html>

@@ -1,0 +1,546 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Weather Map Layout</title>
+
+    <!-- Leaflet CSS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+        integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
+
+    <!-- Google Fonts -->
+    <link
+        href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Roboto+Mono:wght@500&display=swap"
+        rel="stylesheet">
+
+    <style>
+        body,
+        html {
+            margin: 0;
+            padding: 0;
+            height: 100%;
+            width: 100%;
+            font-family: 'Inter', sans-serif;
+            background-color: #1a1a1a;
+        }
+
+        #map {
+            height: 100%;
+            width: 100%;
+            z-index: 1;
+        }
+
+        /* OVERLAY CONTAINER */
+        .player-container {
+            position: fixed;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            height: auto;
+            background: transparent;
+            z-index: 1000;
+            display: flex;
+            flex-direction: column;
+            pointer-events: none;
+            padding: 0 24px 20px 24px;
+        }
+
+        /* CONTROL WIDGET */
+        .control-widget {
+            display: inline-flex;
+            width: fit-content;
+            /* Request 1: Compact width */
+            align-self: flex-start;
+            /* Request 2: Left align */
+            align-items: center;
+            background-color: rgba(255, 255, 255, 0.95);
+            border-radius: 6px 6px 0 0;
+            /* Top rounded, Bottom sharp */
+            padding: 8px 12px;
+            margin-bottom: 0;
+            box-shadow: 0 -1px 3px rgba(0, 0, 0, 0.1);
+            pointer-events: auto;
+            box-sizing: border-box;
+            border: 1px solid rgba(0, 0, 0, 0.1);
+            border-bottom: none;
+            position: relative;
+            /* Ensure it sits on top if needed */
+            z-index: 5;
+            /* Higher than timeline to cover border */
+        }
+
+        .date-display {
+            font-family: 'Roboto Mono', monospace;
+            font-size: 13px;
+            color: #202124;
+            min-width: 160px;
+            margin-right: 16px;
+            /* Adjusted gap */
+            letter-spacing: -0.5px;
+        }
+
+        .playback-controls {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding-left: 16px;
+            /* Stronger Divider */
+            border-left: 1px solid #999;
+            height: 24px;
+            /* Fixed height for divider visualization */
+        }
+
+        /* Buttons */
+        .nav-btn {
+            background: none;
+            border: none;
+            cursor: pointer;
+            color: #5f6368;
+            padding: 4px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: color 0.2s;
+        }
+
+        .nav-btn:hover {
+            color: #000;
+        }
+
+        .nav-btn svg {
+            width: 20px;
+            height: 20px;
+            fill: currentColor;
+        }
+
+        .play-btn-solid {
+            width: 32px;
+            height: 32px;
+            border-radius: 50%;
+            background: #202124;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            transition: transform 0.1s;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+        }
+
+        .play-btn-solid:hover {
+            transform: scale(1.05);
+            background: #000;
+        }
+
+        .play-btn-solid svg {
+            width: 14px;
+            height: 14px;
+            fill: #fff;
+            margin-left: 2px;
+        }
+
+        .more-btn {
+            margin-left: 8px;
+            cursor: pointer;
+            color: #5f6368;
+            display: flex;
+            align-items: center;
+        }
+
+        .more-btn:hover {
+            color: #000;
+        }
+
+        .more-btn svg {
+            width: 18px;
+            height: 18px;
+            fill: currentColor;
+        }
+
+
+        /* TIMELINE TRACK AREA */
+        .bottom-timeline-area {
+            position: relative;
+            width: 100%;
+            height: auto;
+            min-height: 50px;
+            background: rgba(255, 255, 255, 0.9);
+            border-radius: 0 6px 6px 6px;
+            /* Request 3: Top-Left sharp */
+            border: 1px solid rgba(0, 0, 0, 0.1);
+            border-top: 1px solid rgba(0, 0, 0, 0.1);
+            margin-top: -1px;
+            /* Trick to merge borders visually */
+            pointer-events: auto;
+            display: flex;
+            flex-direction: column;
+            justify-content: flex-start;
+            padding: 16px 40px 40px 40px;
+            box-sizing: border-box;
+            backdrop-filter: blur(4px);
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+            z-index: 4;
+        }
+
+        .timeline-axis-line {
+            width: 100%;
+            height: 1px;
+            background-color: #ddd;
+            position: relative;
+            margin-top: 6px;
+        }
+
+        /* Data Container */
+        .data-points-container {
+            position: absolute;
+            bottom: 0px;
+            left: 0;
+            right: 0;
+            display: flex;
+            align-items: flex-end;
+            justify-content: space-between;
+            /* MAGIC KEY */
+            width: 100%;
+        }
+
+        .data-point {
+            width: 3px;
+            /* Small width */
+            height: 6px;
+            background-color: #4285F4;
+            opacity: 0.4;
+            flex-shrink: 0;
+            border-radius: 1px;
+        }
+
+        .data-point.active {
+            opacity: 1;
+            height: 10px;
+            background-color: #1a73e8;
+            box-shadow: 0 0 4px rgba(26, 115, 232, 0.4);
+        }
+
+        /* --- UNIFIED HOVER ELEMENTS --- */
+
+        /* 1. Tooltip */
+        .timeline-tooltip {
+            position: fixed;
+            /* Fixed to escape stacking context */
+            top: 0;
+            left: 0;
+            background-color: #202124;
+            color: #fff;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 11px;
+            font-family: 'Roboto Mono', monospace;
+            pointer-events: none;
+            opacity: 0;
+            /* CENTER ANCHOR */
+            transform: translateX(-50%) translateY(-100%);
+            white-space: nowrap;
+            transition: opacity 0.1s;
+            z-index: 9999;
+            /* Topmost */
+            margin-top: -10px;
+            /* Gap from cursor/line */
+        }
+
+        /* 2. Active Indicator (Triangle) */
+        .active-indicator {
+            position: absolute;
+            /* Keep absolute inside container */
+            top: 2px;
+            /* Just below the axis line */
+            width: 0;
+            height: 0;
+            border-left: 5px solid transparent;
+            border-right: 5px solid transparent;
+            /* Points Up to the squares */
+            border-bottom: 6px solid #1a73e8;
+            opacity: 0;
+            /* CENTER ANCHOR */
+            transform: translateX(-50%);
+            z-index: 20;
+            pointer-events: none;
+        }
+
+        /* 3. Hover Line (Vertical) */
+        .hover-line {
+            position: absolute;
+            /* Keep absolute inside container */
+            top: -30px;
+            /* Extend up to tooltip */
+            bottom: 0px;
+            width: 1px;
+            background-color: #1a73e8;
+            opacity: 0;
+            pointer-events: none;
+            /* CENTER ANCHOR */
+            transform: translateX(-50%);
+            z-index: 15;
+            /* Optional: lighter color or opacity */
+            background-color: rgba(26, 115, 232, 0.5);
+        }
+
+        /* Ticks */
+        .ticks-container {
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            pointer-events: none;
+        }
+
+        .major-tick {
+            position: absolute;
+            top: 0;
+            width: 1px;
+            height: 5px;
+            background-color: #999;
+        }
+
+        .tick-label {
+            position: absolute;
+            top: 16px;
+            /* Slight margin from tick */
+            font-size: 10px;
+            color: #555;
+            font-family: 'Roboto Mono', monospace;
+            transform: translateX(-50%);
+            white-space: nowrap;
+        }
+    </style>
+</head>
+
+<body>
+
+    <div id="map"></div>
+
+    <div class="player-container">
+
+        <!-- Control Widget -->
+        <div class="control-widget">
+            <div class="date-display" id="dateDisplay">2026-02-01 04:00</div>
+
+            <div class="playback-controls">
+                <button class="nav-btn">
+                    <svg viewBox="0 0 24 24">
+                        <path d="M15.41 7.41L14 6l-6 6 6 6 1.41-1.41L10.83 12z" />
+                    </svg>
+                </button>
+                <div class="play-btn-solid">
+                    <svg viewBox="0 0 24 24">
+                        <path d="M8 5v14l11-7z" />
+                    </svg>
+                </div>
+                <button class="nav-btn">
+                    <svg viewBox="0 0 24 24">
+                        <path d="M10 6L8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z" />
+                    </svg>
+                </button>
+                <div class="more-btn">
+                    <svg viewBox="0 0 24 24">
+                        <path
+                            d="M12 8c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zm0 2c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm0 6c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2z" />
+                    </svg>
+                </div>
+            </div>
+        </div>
+
+        <!-- Timeline Track -->
+        <div class="bottom-timeline-area" id="timelineTrack">
+            <!-- Floating Elements Container -->
+            <div class="timeline-axis-line">
+                <!-- Data -->
+                <div class="data-points-container" id="pointsContainer"></div>
+                <!-- Ticks -->
+                <div class="ticks-container" id="ticksContainer"></div>
+
+                <!-- Dynamics (Now children of axis-line relative) -->
+                <div class="hover-line" id="hoverLine"></div>
+                <div class="active-indicator" id="activeIndicator"></div>
+            </div>
+        </div>
+
+    </div>
+
+    <!-- Tooltip moved to root to escape stacking contexts/filters -->
+    <div class="timeline-tooltip" id="tooltip">Feb 01, 12:00</div>
+
+    <!-- Leaflet JS -->
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+        integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+
+    <script>
+        var map = L.map('map', {
+            zoomControl: false,
+            attributionControl: false
+        }).setView([-2.5, 118], 5);
+
+        L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 }).addTo(map);
+
+        // --- Logic ---
+        const timelineTrack = document.getElementById('timelineTrack');
+        const pointsContainer = document.getElementById('pointsContainer');
+        const ticksContainer = document.getElementById('ticksContainer');
+        const tooltip = document.getElementById('tooltip');
+        const dateDisplay = document.getElementById('dateDisplay');
+        const activeIndicator = document.getElementById('activeIndicator');
+        const hoverLine = document.getElementById('hoverLine');
+
+        // Config: Hourly Loop Logic
+        const startDate = new Date("2026-02-01T00:00:00");
+        const endDate = new Date("2026-02-07T23:59:59"); // 7 days range
+        const data = [];
+
+        // 1. Generate Data (Hourly Loop)
+        let iter = new Date(startDate);
+        while (iter <= endDate) {
+            data.push({
+                date: new Date(iter),
+                label: iter.toLocaleString('en-GB', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', hour12: false }).replace(',', '')
+            });
+            // Increment by 1 hour
+            iter.setHours(iter.getHours() + 1);
+        }
+
+        // Render Points
+        data.forEach((item, index) => {
+            const el = document.createElement('div');
+            el.className = 'data-point';
+            pointsContainer.appendChild(el);
+        });
+
+        // Render Ticks (Day Separators)
+        // Note: keeping day separators for visual reference
+        const startTime = data[0].date.getTime();
+        const endTime = data[data.length - 1].date.getTime();
+        const totalDuration = endTime - startTime;
+
+        let iterDate = new Date(startDate);
+        iterDate.setHours(0, 0, 0, 0);
+
+        while (iterDate.getTime() <= endTime) {
+            if (iterDate.getTime() >= startTime) {
+                const posPercent = ((iterDate.getTime() - startTime) / totalDuration) * 100;
+
+                // Tick
+                const tick = document.createElement('div');
+                tick.className = 'major-tick';
+                tick.style.left = `${posPercent}%`;
+                ticksContainer.appendChild(tick);
+
+                // Label
+                const label = document.createElement('div');
+                label.className = 'tick-label';
+                label.innerText = iterDate.toLocaleString('en-US', { day: '2-digit', month: 'short' });
+                label.style.left = `${posPercent}%`;
+                ticksContainer.appendChild(label);
+            }
+            iterDate.setDate(iterDate.getDate() + 1);
+        }
+
+        // --- UNIFIED HOVER LOGIC ---
+        let hoveredIndex = -1;
+        // Padding must match CSS of .bottom-timeline-area
+        const padding = 8;
+
+        timelineTrack.addEventListener('mouseenter', () => {
+            // 
+        });
+
+        timelineTrack.addEventListener('mouseleave', () => {
+            tooltip.style.opacity = '0';
+            activeIndicator.style.opacity = '0';
+            hoverLine.style.opacity = '0';
+
+            if (hoveredIndex !== -1 && pointsContainer.children[hoveredIndex]) {
+                pointsContainer.children[hoveredIndex].classList.remove('active');
+            }
+            hoveredIndex = -1;
+        });
+
+        timelineTrack.addEventListener('mousemove', (e) => {
+            // Show elements
+            tooltip.style.opacity = '1';
+            activeIndicator.style.opacity = '1';
+            hoverLine.style.opacity = '1';
+
+            const mouseX = e.clientX;
+
+            // --- 1. PROXIMITY CHECK (NEAREST NEIGHBOR) ---
+            // Iterate all visual elements to find the one closest to the mouse.
+            // This bypasses math/ratio issues and trusts the browser's rendered position.
+
+            let closestIndex = -1;
+            let minDistance = Infinity;
+            let winnerRect = null;
+            let winnerCenterScreenX = 0;
+
+            const children = pointsContainer.children;
+            for (let i = 0; i < children.length; i++) {
+                const el = children[i];
+                const rect = el.getBoundingClientRect();
+                const centerX = rect.left + (rect.width / 2);
+
+                const dist = Math.abs(mouseX - centerX);
+
+                if (dist < minDistance) {
+                    minDistance = dist;
+                    closestIndex = i;
+                    winnerRect = rect;
+                    winnerCenterScreenX = centerX;
+                }
+            }
+
+            // --- 2. UPDATE VISUALS ---
+            if (closestIndex !== -1 && winnerRect) {
+                const index = closestIndex;
+
+                // A. Tooltip Position (Fixed Mode)
+                // Use the SCReen X of the winner element
+                tooltip.style.left = `${winnerCenterScreenX}px`;
+
+                // For Y, we want it above the track. 
+                // We can use the track's top position.
+                const trackRect = timelineTrack.getBoundingClientRect();
+                tooltip.style.top = `${trackRect.top}px`;
+
+                // B. Indicators Position (Absolute Mode)
+                // For indicators inside the relative container, we use offsetLeft + half width
+                const targetEl = children[index];
+                const relativePixelX = targetEl.offsetLeft + (targetEl.offsetWidth / 2);
+
+                activeIndicator.style.left = `${relativePixelX}px`;
+                hoverLine.style.left = `${relativePixelX}px`;
+
+                // C. Update State
+                if (index !== hoveredIndex) {
+                    if (hoveredIndex !== -1 && pointsContainer.children[hoveredIndex]) {
+                        pointsContainer.children[hoveredIndex].classList.remove('active');
+                    }
+
+                    hoveredIndex = index;
+                    if (pointsContainer.children[hoveredIndex])
+                        pointsContainer.children[hoveredIndex].classList.add('active');
+
+                    const item = data[index];
+                    if (item) {
+                        tooltip.innerText = item.label;
+                        dateDisplay.innerText = item.label;
+                    }
+                }
+            }
+        });
+
+        // Init visual state
+        if (data.length > 0) {
+            // hidden initially
+        }
+
+    </script>
+</body>
+
+</html>

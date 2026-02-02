@@ -1,0 +1,9 @@
+xarray[complete]
+cfgrib
+eccodes
+rioxarray
+rasterio
+zarr
+pandas
+matplotlib
+pyarrow

@@ -1,0 +1,553 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <title>Wind Particle Visualization</title>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <style>
+        body,
+        html {
+            margin: 0;
+            padding: 0;
+            height: 100%;
+            background: #1a1a1a;
+            font-family: 'Segoe UI', sans-serif;
+            overflow: hidden;
+        }
+
+        #map {
+            width: 100%;
+            height: 100%;
+            background: #1a1a1a;
+        }
+
+        .controls {
+            position: absolute;
+            bottom: 30px;
+            left: 20px;
+            right: 20px;
+            background: rgba(30, 30, 30, 0.9);
+            padding: 15px;
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            gap: 15px;
+            color: white;
+            z-index: 1000;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+            backdrop-filter: blur(5px);
+            max-width: 800px;
+        }
+
+        #playBtn {
+            background: #0096FF;
+            border: none;
+            color: white;
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            cursor: pointer;
+            font-size: 18px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: background 0.2s;
+        }
+
+        #playBtn:hover {
+            background: #007acc;
+        }
+
+        #timeSlider {
+            flex-grow: 1;
+            cursor: pointer;
+        }
+
+        #timeDisplay {
+            min-width: 180px;
+            font-family: monospace;
+            font-size: 14px;
+            color: #ddd;
+        }
+
+        .info-panel {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            background: rgba(30, 30, 30, 0.9);
+            color: white;
+            padding: 15px;
+            border-radius: 8px;
+            z-index: 1000;
+            pointer-events: none;
+        }
+    </style>
+</head>
+
+<body>
+    <div id="map"></div>
+
+    <div class="info-panel">
+        <h3 style="margin: 0 0 10px 0; font-size: 16px; border-bottom: 1px solid #555; padding-bottom: 5px;">Wind Viewer
+        </h3>
+        <div id="status">Loading Data...</div>
+    </div>
+
+    <div class="controls">
+        <button id="playBtn" onclick="togglePlay()">▶</button>
+        <div style="display: flex; flex-direction: column; flex-grow: 1; gap: 5px;">
+            <div style="display: flex; gap: 10px; align-items: center;">
+                <input type="range" id="timeSlider" min="0" max="0" value="0" oninput="seek(this.value)"
+                    style="flex-grow: 1;">
+            </div>
+            <div style="display: flex; gap: 20px; font-size: 12px; color: #ccc;">
+                <label style="display: flex; gap: 5px; align-items: center;">
+                    Particles: <input type="range" id="particleCountSlider" min="100" max="10000" step="100"
+                        value="4000" oninput="updateParticles(this.value)">
+                    <span id="particleCountDisplay">4000</span>
+                </label>
+                <label style="display: flex; gap: 5px; align-items: center;">
+                    Speed: <input type="range" id="speedSlider" min="0.01" max="1.0" step="0.01" value="0.25"
+                        oninput="updateSpeed(this.value)">
+                    <span id="speedDisplay">0.25</span>
+                </label>
+            </div>
+        </div>
+        <div id="timeDisplay">--:--</div>
+    </div>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script>
+        // --- Configuration ---
+        const PARTICLE_COUNT = 4000;
+        const PARTICLE_OPACITY = 1.0;
+        const PARTICLE_SPEED_SCALE = 0.25; // Slower for smoother high-zoom visuals
+        const FADE_OPACITY = 0.97; // Higher = longer trails
+
+        // --- Map Setup ---
+        var map = L.map('map', {
+            zoomControl: false,
+            attributionControl: false
+        }).setView([-2.0, 110.0], 5);
+
+        L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+            maxZoom: 19,
+            subdomains: 'abcd'
+        }).addTo(map);
+
+        // --- Wind Layer ---
+        // --- Wind Layer ---
+        // --- Wind Layer ---
+        L.WindLayer = L.Layer.extend({
+            onAdd: function (map) {
+                this._map = map;
+
+                // Config
+                this.GRID_SIZE = 20; // Grid cell size in pixels
+                this.particleCount = PARTICLE_COUNT;
+                this.speedScale = PARTICLE_SPEED_SCALE;
+
+                // Canvas for drawing particles
+                this._canvas = L.DomUtil.create('canvas', 'leaflet-layer');
+                this._canvas.style.pointerEvents = 'none';
+                map.getPanes().overlayPane.appendChild(this._canvas);
+
+                // Internal Context
+                this._ctx = this._canvas.getContext('2d');
+
+                // Hidden Canvas for reading data
+                this._dataCanvas = document.createElement('canvas');
+                this._dataCtx = this._dataCanvas.getContext('2d', { willReadFrequently: true });
+
+                this._particles = [];
+                this._windGrid = [];
+                this._gridW = 0;
+                this._gridH = 0;
+
+                // Events
+                map.on('moveend', this._onMoveEnd, this);
+                map.on('resize', this._resize, this);
+                map.on('zoomend', this._onZoom, this);
+
+                this._resize();
+                this._animate = this._animate.bind(this);
+                requestAnimationFrame(this._animate);
+            },
+
+            setParticleCount: function (count) {
+                this.particleCount = parseInt(count);
+                this._initParticles();
+            },
+
+            setSpeedScale: function (scale) {
+                this.speedScale = parseFloat(scale);
+            },
+
+            onRemove: function (map) {
+                map.off('moveend', this._onMoveEnd, this);
+                map.off('resize', this._resize, this);
+                map.off('zoomend', this._onZoom, this);
+                if (this._canvas.parentNode) {
+                    this._canvas.parentNode.removeChild(this._canvas);
+                }
+            },
+
+            _onZoom: function () {
+                this._onMoveEnd();
+            },
+
+            _onMoveEnd: function () {
+                this._updateMapPosition();
+                this._buildWindGrid();
+                this._initParticles(); // Respawn on new view
+            },
+
+            _resize: function () {
+                var size = this._map.getSize();
+                this._canvas.width = size.x;
+                this._canvas.height = size.y;
+                this._onMoveEnd();
+            },
+
+            _updateMapPosition: function () {
+                // Align canvas with current viewport
+                var topLeft = this._map.containerPointToLayerPoint([0, 0]);
+                L.DomUtil.setPosition(this._canvas, topLeft);
+                this._drawClear();
+            },
+
+            _initParticles: function () {
+                // Particles: x(screen), y(screen), age, speed_factor
+                this._particles = new Float32Array(this.particleCount * 4);
+                for (var i = 0; i < this.particleCount; i++) {
+                    this._resetParticle(i, true);
+                }
+            },
+
+            _resetParticle: function (i) {
+                // Random position on SCREEN
+                var w = this._canvas.width;
+                var h = this._canvas.height;
+
+                this._particles[i * 4] = Math.random() * w;     // x
+                this._particles[i * 4 + 1] = Math.random() * h; // y
+                this._particles[i * 4 + 2] = Math.random() * 100; // Age
+                this._particles[i * 4 + 3] = 1.0;
+            },
+
+            loadData: function (img, uMin, uMax, vMin, vMax, gridMeta) {
+                this._uMin = uMin; this._uMax = uMax;
+                this._vMin = vMin; this._vMax = vMax;
+                this._gridMeta = gridMeta;
+
+                this._dataCanvas.width = img.width;
+                this._dataCanvas.height = img.height;
+                this._dataCtx.drawImage(img, 0, 0);
+                this._gridData = this._dataCtx.getImageData(0, 0, img.width, img.height).data;
+
+                this._sourceGridWidth = img.width;
+                this._sourceGridHeight = img.height;
+
+                // Pre-calc deltas for source grid
+                this._dLat = (gridMeta.lats[0] - gridMeta.lats[img.height - 1]) / img.height;
+                this._dLon = (gridMeta.lons[img.width - 1] - gridMeta.lons[0]) / img.width;
+                this._lat0 = gridMeta.lats[0];
+                this._lon0 = gridMeta.lons[0];
+
+                this._buildWindGrid();
+            },
+
+            _buildWindGrid: function () {
+                if (!this._gridData) return;
+
+                var w = this._canvas.width;
+                var h = this._canvas.height;
+                this._gridW = Math.ceil(w / this.GRID_SIZE);
+                this._gridH = Math.ceil(h / this.GRID_SIZE);
+
+                this._windGrid = new Float32Array(this._gridW * this._gridH * 2); // vx, vy
+
+                // SCALE FACTOR: Simulate large displacement to ensure robust pixel vectors
+                // 3600s (1 hour) * speed.
+                var VECTOR_DT = 3600;
+
+                for (var y = 0; y < this._gridH; y++) {
+                    for (var x = 0; x < this._gridW; x++) {
+                        var px = x * this.GRID_SIZE;
+                        var py = y * this.GRID_SIZE;
+
+                        // 1. Get Lat/Lon for this screen pixel
+                        var latLng = this._map.containerPointToLatLng([px, py]);
+
+                        // 2. Sample Wind (u,v in m/s)
+                        var wind = this._sampleWind(latLng.lng, latLng.lat);
+                        var u = wind[0];
+                        var v = wind[1];
+
+                        // 3. Project Vector to Screen Pixels
+                        // Calculate next point after 1 second (arbitrary dt)
+                        // Earth Radius ~ 6371km
+                        // Simple spherical approximation for displacement
+                        var R = 6371000;
+                        var dLat = (v * VECTOR_DT / R) * (180 / Math.PI);
+                        var cosLat = Math.cos(latLng.lat * Math.PI / 180);
+                        // Avoid division by zero at poles
+                        if (Math.abs(cosLat) < 0.001) cosLat = 0.001;
+                        var dLon = (u * VECTOR_DT / (R * cosLat)) * (180 / Math.PI);
+
+                        // Find screen pos of displaced point
+                        // Use try-catch for projection errors
+                        try {
+                            var p1 = this._map.latLngToContainerPoint([latLng.lat + dLat, latLng.lng + dLon]);
+                            var p0 = this._map.latLngToContainerPoint(latLng);
+
+                            // Vector in Pixels
+                            var vx = (p1.x - p0.x);
+                            var vy = (p1.y - p0.y);
+
+                            // Store
+                            var idx = (y * this._gridW + x) * 2;
+                            this._windGrid[idx] = vx;
+                            this._windGrid[idx + 1] = vy;
+                        } catch (e) {
+                            // Ignore projection errors
+                        }
+                    }
+                }
+                console.log("Wind Grid Built. Grid Size:", this._gridW, this._gridH, "Total:", this._windGrid.length);
+            },
+
+            _sampleWind: function (lon, lat) {
+                if (!this._gridData) return [0, 0];
+
+                // Map Lat/Lon to Grid X/Y
+                // Grid is Rectilinear. top-left is lat0, lon0.
+                // y goes down (lat decreases). x goes right (lon increases).
+
+                var x = (lon - this._lon0) / this._dLon;
+                var y = (this._lat0 - lat) / this._dLat;
+
+                if (x < 0 || x >= this._sourceGridWidth - 1 || y < 0 || y >= this._sourceGridHeight - 1) {
+                    return [0, 0];
+                }
+
+                // Bilinear Interpolation
+                var x0 = Math.floor(x);
+                var y0 = Math.floor(y);
+                var dx = x - x0;
+                var dy = y - y0;
+
+                var idx = (y0 * this._sourceGridWidth + x0) * 4;
+                var idxRight = idx + 4;
+                var idxDown = idx + this._sourceGridWidth * 4;
+                var idxDownRight = idxDown + 4;
+
+                // Decode U (Red), V (Green)
+                // Normalize 0-255 -> uMin-uMax
+                function decode(val, min, max) { return min + (val / 255.0) * (max - min); }
+
+                var u00 = decode(this._gridData[idx], this._uMin, this._uMax);
+                var v00 = decode(this._gridData[idx + 1], this._vMin, this._vMax);
+
+                var u10 = decode(this._gridData[idxRight], this._uMin, this._uMax);
+                var v10 = decode(this._gridData[idxRight + 1], this._vMin, this._vMax);
+
+                var u01 = decode(this._gridData[idxDown], this._uMin, this._uMax);
+                var v01 = decode(this._gridData[idxDown + 1], this._vMin, this._vMax);
+
+                var u11 = decode(this._gridData[idxDownRight], this._uMin, this._uMax);
+                var v11 = decode(this._gridData[idxDownRight + 1], this._vMin, this._vMax);
+
+                // Interpolate
+                var uTop = u00 * (1 - dx) + u10 * dx;
+                var uBot = u01 * (1 - dx) + u11 * dx;
+                var u = uTop * (1 - dy) + uBot * dy;
+
+                var vTop = v00 * (1 - dx) + v10 * dx;
+                var vBot = v01 * (1 - dx) + v11 * dx;
+                var v = vTop * (1 - dy) + vBot * dy;
+
+                return [u, v];
+            },
+
+            _drawClear: function () {
+                this._ctx.clearRect(0, 0, this._canvas.width, this._canvas.height);
+            },
+
+            _animate: function () {
+                if (!this._windGrid || this._windGrid.length === 0) {
+                    requestAnimationFrame(this._animate);
+                    return;
+                }
+
+                // Fade out trails
+                this._ctx.globalCompositeOperation = 'destination-in';
+                this._ctx.fillStyle = `rgba(0, 0, 0, ${FADE_OPACITY})`;
+                this._ctx.fillRect(0, 0, this._canvas.width, this._canvas.height);
+                this._ctx.globalCompositeOperation = 'source-over';
+
+                // Draw Particles
+                this._ctx.beginPath();
+                this._ctx.strokeStyle = `rgba(255, 255, 255, ${PARTICLE_OPACITY})`;
+                this._ctx.lineWidth = 1.5;
+
+                for (var i = 0; i < this.particleCount; i++) {
+                    var idx = i * 4;
+                    var x = this._particles[idx];
+                    var y = this._particles[idx + 1];
+                    var age = this._particles[idx + 2];
+
+                    if (age > 100) {
+                        this._resetParticle(i);
+                        x = this._particles[idx];
+                        y = this._particles[idx + 1];
+                    }
+
+                    // Vector Interpolation from Screen Grid
+                    var gx = x / this.GRID_SIZE;
+                    var gy = y / this.GRID_SIZE;
+
+                    var vx = 0, vy = 0;
+
+                    if (gx >= 0 && gx < this._gridW - 1 && gy >= 0 && gy < this._gridH - 1) {
+                        var gx0 = Math.floor(gx);
+                        var gy0 = Math.floor(gy);
+                        var dx = gx - gx0;
+                        var dy = gy - gy0;
+
+                        var gIdx = (gy0 * this._gridW + gx0) * 2;
+
+                        var vx00 = this._windGrid[gIdx];
+                        var vy00 = this._windGrid[gIdx + 1];
+                        var vx10 = this._windGrid[gIdx + 2];
+                        var vy10 = this._windGrid[gIdx + 3];
+                        var vx01 = this._windGrid[gIdx + this._gridW * 2];
+                        var vy01 = this._windGrid[gIdx + this._gridW * 2 + 1];
+                        var vx11 = this._windGrid[gIdx + this._gridW * 2 + 2];
+                        var vy11 = this._windGrid[gIdx + this._gridW * 2 + 3];
+
+                        var vxTop = vx00 * (1 - dx) + vx10 * dx;
+                        var vxBot = vx01 * (1 - dx) + vx11 * dx;
+                        vx = vxTop * (1 - dy) + vxBot * dy;
+
+                        var vyTop = vy00 * (1 - dx) + vy10 * dx;
+                        var vyBot = vy01 * (1 - dx) + vy11 * dx;
+                        vy = vyTop * (1 - dy) + vyBot * dy;
+                    }
+
+                    // Move Particle
+                    // vx/vy are displacement for 3600s. roughly 0.05 * speed per frame
+                    var nextX = x + vx * this.speedScale * 0.05;
+                    var nextY = y + vy * this.speedScale * 0.05;
+
+                    // Draw
+                    this._ctx.moveTo(x, y);
+                    this._ctx.lineTo(nextX, nextY);
+
+                    // Update
+                    this._particles[idx] = nextX;
+                    this._particles[idx + 1] = nextY;
+                    this._particles[idx + 2]++;
+
+                    // Boundary check
+                    if (nextX < 0 || nextX > this._canvas.width || nextY < 0 || nextY > this._canvas.height) {
+                        this._resetParticle(i);
+                    }
+                }
+
+                this._ctx.stroke();
+                requestAnimationFrame(this._animate);
+            }
+        });
+
+        var windLayer = new L.WindLayer();
+        windLayer.addTo(map);
+
+        // --- Application Logic ---
+        var manifest = null;
+        var frames = [];
+        var currentFrameIndex = 0;
+        var isPlaying = false;
+        var playInterval = null;
+
+        fetch('output/manifest_wind.json')
+            .then(r => r.json())
+            .then(data => {
+                manifest = data;
+                frames = data.frames;
+
+                var slider = document.getElementById('timeSlider');
+                slider.max = frames.length - 1;
+
+                loadFrame(0);
+                document.getElementById('status').innerText = "Running";
+            })
+            .catch(e => {
+                console.error(e);
+                document.getElementById('status').innerText = "Error: " + e.message;
+            });
+
+        function loadFrame(index) {
+            if (!frames[index]) return;
+            var frame = frames[index];
+            currentFrameIndex = index;
+
+            // Update UI
+            var date = new Date("2026-01-31T12:00:00Z"); // Start Time (Mock)
+            date.setHours(date.getHours() + frame.hour);
+            document.getElementById('timeDisplay').innerText = date.toLocaleString();
+
+            // Load Image
+            var img = new Image();
+            img.onload = () => {
+                windLayer.loadData(
+                    img,
+                    frame.u_min, frame.u_max,
+                    frame.v_min, frame.v_max,
+                    manifest.grid
+                );
+            };
+            img.src = 'output/' + frame.file;
+        }
+
+        function togglePlay() {
+            if (isPlaying) {
+                clearInterval(playInterval);
+                document.getElementById('playBtn').innerText = "▶";
+                isPlaying = false;
+            } else {
+                document.getElementById('playBtn').innerText = "⏸";
+                isPlaying = true;
+                playInterval = setInterval(() => {
+                    var next = currentFrameIndex + 1;
+                    if (next >= frames.length) next = 0;
+                    document.getElementById('timeSlider').value = next;
+                    loadFrame(next);
+                }, 200); // 200ms per frame for data update
+            }
+        }
+
+        function seek(val) {
+            loadFrame(parseInt(val));
+        }
+
+        function updateParticles(val) {
+            document.getElementById('particleCountDisplay').innerText = val;
+            if (windLayer) {
+                windLayer.setParticleCount(val);
+            }
+        }
+
+        function updateSpeed(val) {
+            document.getElementById('speedDisplay').innerText = val;
+            if (windLayer) {
+                windLayer.setSpeedScale(val);
+            }
+        }
+
+    </script>
+</body>
+
+</html>

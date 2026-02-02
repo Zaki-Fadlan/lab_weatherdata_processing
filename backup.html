@@ -1,0 +1,449 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <title>Binary Weather Visualization</title>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <style>
+        body,
+        html {
+            margin: 0;
+            padding: 0;
+            height: 100%;
+            font-family: 'Segoe UI', sans-serif;
+        }
+
+        #map {
+            width: 100%;
+            height: 100%;
+            background: #1a1a1a;
+        }
+
+        .info-box {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            background: rgba(30, 30, 30, 0.9);
+            color: #fff;
+            padding: 15px;
+            border-radius: 8px;
+            z-index: 1000;
+            min-width: 220px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+            backdrop-filter: blur(5px);
+        }
+
+        .legend {
+            position: absolute;
+            bottom: 30px;
+            right: 20px;
+            background: rgba(30, 30, 30, 0.9);
+            color: #fff;
+            padding: 10px;
+            border-radius: 8px;
+            z-index: 1000;
+            font-size: 12px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+            backdrop-filter: blur(5px);
+        }
+
+        .legend-item {
+            display: flex;
+            align-items: center;
+            margin: 4px 0;
+        }
+
+        .color-box {
+            width: 20px;
+            height: 20px;
+            margin-right: 8px;
+            border-radius: 3px;
+        }
+
+        h3 {
+            margin-top: 0;
+            font-size: 16px;
+            border-bottom: 1px solid #444;
+            padding-bottom: 8px;
+        }
+    </style>
+</head>
+
+<body>
+    <div id="map"></div>
+    <div class="info-box">
+        <h3>Weather Visualizer</h3>
+        <div id="inspector">Loading...</div>
+    </div>
+
+    <div class="legend">
+        <strong>Precipitation (kg/m²)</strong>
+        <div class="legend-item">
+            <div class="color-box" style="background: rgba(0,255,255,0.8)"></div> 0 - 2 (Light)
+        </div>
+        <div class="legend-item">
+            <div class="color-box" style="background: rgba(0,150,255,0.9)"></div> 2 - 10 (Moderate)
+        </div>
+        <div class="legend-item">
+            <div class="color-box" style="background: rgba(0,0,255,0.9)"></div> 10 - 25 (Heavy)
+        </div>
+        <div class="legend-item">
+            <div class="color-box" style="background: rgba(150,0,200,0.9)"></div> 25 - 50 (Intense)
+        </div>
+        <div class="legend-item">
+            <div class="color-box" style="background: rgba(255,0,0,0.9)"></div> > 50 (Extreme)
+        </div>
+    </div>
+
+    <div class="controls">
+        <button id="playBtn" onclick="togglePlay()">▶</button>
+        <input type="range" id="timeSlider" min="0" max="0" value="0" oninput="seek(this.value)">
+        <div id="timeDisplay">Loading Timeline...</div>
+    </div>
+
+    <style>
+        .controls {
+            position: absolute;
+            bottom: 30px;
+            left: 20px;
+            right: 250px;
+            /* Space for legend */
+            background: rgba(30, 30, 30, 0.9);
+            padding: 15px;
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            gap: 15px;
+            color: white;
+            z-index: 1000;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+            backdrop-filter: blur(5px);
+        }
+
+        #playBtn {
+            background: #0096FF;
+            border: none;
+            color: white;
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            cursor: pointer;
+            font-size: 18px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        #playBtn:hover {
+            background: #007acc;
+        }
+
+        #timeSlider {
+            flex-grow: 1;
+            cursor: pointer;
+        }
+
+        #timeDisplay {
+            min-width: 150px;
+            font-family: monospace;
+            font-size: 14px;
+        }
+    </style>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script>
+        var map = L.map('map').setView([-2.0, 110.0], 5);
+
+        L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+            attribution: '&copy; OpenStreetMap &copy; CARTO',
+            maxZoom: 19
+        }).addTo(map);
+
+        L.CanvasLayer = L.Layer.extend({
+            onAdd: function (map) {
+                this._map = map;
+                this._canvas = L.DomUtil.create('canvas', 'leaflet-layer');
+                this._canvas.style.pointerEvents = 'none';
+                this._updateSize();
+                map.getPanes().overlayPane.appendChild(this._canvas);
+
+                map.on('moveend', this._update, this);
+                map.on('zoomend', this._update, this);
+                map.on('resize', this._resize, this);
+
+                this._initAnimation();
+            },
+
+            _updateSize: function () {
+                var size = this._map.getSize();
+                this._canvas.width = size.x;
+                this._canvas.height = size.y;
+            },
+
+            _resize: function () {
+                this._updateSize();
+                this._update();
+            },
+
+            _initAnimation: function () {
+                console.log("Initializing Animation...");
+
+                fetch('output/manifest.json')
+                    .then(r => r.json())
+                    .then(manifest => {
+                        window.weatherManifest = manifest;
+                        this._meta = manifest.grid; // Shared Grid Integers
+                        this._frames = manifest.frames;
+                        this._mode = 'image_png';
+
+                        // Setup Slider
+                        var slider = document.getElementById('timeSlider');
+                        slider.max = this._frames.length - 1;
+                        slider.value = 0;
+
+                        // Load First Frame
+                        this._loadFrame(0);
+                    })
+                    .catch(e => {
+                        console.error("Error loading manifest:", e);
+                        document.getElementById('inspector').innerText = "Process pending. Run python script.";
+                    });
+            },
+
+            _loadFrame: function (index) {
+                if (!window.weatherManifest) return;
+                var frame = this._frames[index];
+                if (!frame) return;
+
+                // Update UI
+                var date = new Date("2026-01-31T12:00:00Z"); // Base time from filename
+                date.setHours(date.getHours() + frame.hour);
+                document.getElementById('timeDisplay').innerText = date.toLocaleString();
+
+                var img = new Image();
+                img.onload = () => {
+                    // Optimization: Create canvas once
+                    if (!this._decodeCanvas) {
+                        this._decodeCanvas = document.createElement('canvas');
+                    }
+                    this._decodeCanvas.width = img.width;
+                    this._decodeCanvas.height = img.height;
+                    var ctx = this._decodeCanvas.getContext('2d');
+                    ctx.drawImage(img, 0, 0);
+
+                    var imgData = ctx.getImageData(0, 0, img.width, img.height);
+                    var pixels = imgData.data;
+
+                    var count = img.width * img.height;
+
+                    // Reuse array if size matches
+                    if (!this._data || this._data.length !== count) {
+                        this._data = new Float32Array(count);
+                    }
+
+                    var min = frame.min;
+                    var range = frame.max - min;
+
+                    // Decode
+                    for (var i = 0; i < count; i++) {
+                        var pixelVal = pixels[i * 4];
+                        this._data[i] = (pixelVal / 255.0 * range) + min;
+                    }
+
+                    this._update();
+                };
+                img.src = 'output/' + frame.file;
+            },
+
+            _update: function () {
+                if (!this._data) return;
+
+                // CRITICAL FIX: Reposition Canvas to match Viewport
+                // The overlayPane moves, so we must offset the canvas back to (0,0) of the screen
+                var topLeft = this._map.containerPointToLayerPoint([0, 0]);
+                L.DomUtil.setPosition(this._canvas, topLeft);
+
+                var ctx = this._canvas.getContext('2d');
+                ctx.clearRect(0, 0, this._canvas.width, this._canvas.height);
+
+                var bounds = this._map.getBounds();
+                var south = bounds.getSouth();
+                var north = bounds.getNorth();
+                var west = bounds.getWest();
+                var east = bounds.getEast();
+
+                // Color Function (Precipitation Scale)
+                function getColor(val) {
+                    if (val <= 0.05) return null; // Lower threshold to see light rain
+
+                    // Rain / Precipitation Scale (mm or kg/m2)
+                    if (val < 2) return `rgba(0, 255, 255, ${0.4 + val / 4})`;      // Cyan (Light)
+                    if (val < 10) return `rgba(0, 150, 255, ${0.6 + val / 20})`;    // Sky Blue
+                    if (val < 25) return `rgba(0, 0, 255, 0.8)`;                  // Blue
+                    if (val < 50) return `rgba(150, 0, 200, 0.9)`;                // Purple
+                    return `rgba(255, 0, 0, 0.9)`;                                // Red (Extreme)
+                }
+
+                if (this._mode === 'rectilinear' || this._mode === 'image_png') {
+                    // Rectilinear Render: Data is 1D array of Values in Row-Major order
+                    var lons = this._meta.lons;
+                    var lats = this._meta.lats;
+                    var width = this._meta.width;
+                    var height = this._meta.height;
+
+                    // Iterate Rows (Latitudes)
+                    for (var j = 0; j < height; j++) {
+                        var lat = lats[j];
+                        if (lat < south || lat > north) continue;
+
+                        // Iterate Cols (Longitudes)
+                        for (var i = 0; i < width; i++) {
+                            var lon = lons[i];
+                            if (lon < west || lon > east) continue;
+
+                            var val = this._data[j * width + i];
+                            if (val <= 0) continue;
+
+                            var p = this._map.latLngToContainerPoint([lat, lon]);
+
+                            // Dynamic Cell Size Calculation (Fill the Gap)
+                            // Look ahead to next grid point to determine pixel width/height
+                            // Fallback to average delta if at edge
+                            var nextLon = (i < width - 1) ? lons[i + 1] : (lons[i] + 0.027);
+                            var nextLat = (j < height - 1) ? lats[j + 1] : (lats[j] - 0.027); // Lats are Descending
+
+                            var pNext = this._map.latLngToContainerPoint([nextLat, nextLon]);
+
+                            var w = Math.abs(pNext.x - p.x) + 1; // +1 to prevent subpixel gaps
+                            var h = Math.abs(pNext.y - p.y) + 1;
+
+                            ctx.fillStyle = getColor(val);
+                            ctx.fillRect(p.x, p.y, w, h);
+                        }
+                    }
+                } else {
+                    // Point Cloud Render (3 Floats per pixel)
+                    for (var i = 0; i < this._data.length; i += 3) {
+                        var lat = this._data[i];
+                        var lon = this._data[i + 1];
+                        var val = this._data[i + 2];
+
+                        if (val <= 0) continue;
+                        if (lat < south || lat > north || lon < west || lon > east) continue;
+
+                        var p = this._map.latLngToContainerPoint([lat, lon]);
+
+                        ctx.fillStyle = getColor(val);
+                        ctx.fillRect(p.x, p.y, 2, 2);
+                    }
+                }
+            },
+
+            _initInteraction: function () {
+                this._map.on('mousemove', (e) => {
+                    if (!this._data) return;
+
+                    var mouseLat = e.latlng.lat;
+                    var mouseLon = e.latlng.lng;
+                    var closestVal = null;
+
+                    if (this._mode === 'rectilinear' || this._mode === 'image_png') {
+                        // Efficient Search in Sorted Arrays
+                        var lats = this._meta.lats;
+                        var lons = this._meta.lons;
+
+                        // Simple helper to find nearest index
+                        function findNearest(arr, target) {
+                            var minDiff = Infinity;
+                            var idx = -1;
+                            for (var i = 0; i < arr.length; i++) {
+                                var d = Math.abs(arr[i] - target);
+                                if (d < minDiff) {
+                                    minDiff = d;
+                                    idx = i;
+                                }
+                            }
+                            return { index: idx, dist: minDiff };
+                        }
+
+                        var latObj = findNearest(lats, mouseLat);
+                        var lonObj = findNearest(lons, mouseLon);
+
+                        // Threshold check (e.g. 0.05 degrees)
+                        if (latObj.dist < 0.05 && lonObj.dist < 0.05) {
+                            var idx = latObj.index * this._meta.width + lonObj.index;
+                            if (idx >= 0 && idx < this._data.length) {
+                                closestVal = this._data[idx];
+                            }
+                        }
+
+                    } else {
+                        // Point Cloud Search
+                        var minDist = 0.1;
+                        for (var i = 0; i < this._data.length; i += 3) {
+                            var lat = this._data[i];
+                            var lon = this._data[i + 1];
+
+                            if (Math.abs(lat - mouseLat) < minDist && Math.abs(lon - mouseLon) < minDist) {
+                                var d = Math.sqrt((lat - mouseLat) ** 2 + (lon - mouseLon) ** 2);
+                                if (d < minDist) {
+                                    minDist = d;
+                                    closestVal = this._data[i + 2];
+                                }
+                            }
+                        }
+                    }
+
+                    var div = document.getElementById('inspector');
+                    if (closestVal !== null) {
+                        div.innerHTML = `Precipitation:<br><b>${closestVal.toFixed(3)} kg/m²</b>`;
+                    } else {
+                        div.innerHTML = "Hover for values...";
+                    }
+                });
+            }
+        });
+
+        map.addLayer(new L.CanvasLayer());
+
+        // Animation Controls
+        var isPlaying = false;
+        var animInterval = null;
+        var currentIndex = 0;
+
+        function togglePlay() {
+            var layer = null;
+            map.eachLayer(l => { if (l._initAnimation) layer = l; });
+
+            if (isPlaying) {
+                clearInterval(animInterval);
+                document.getElementById('playBtn').innerText = "▶";
+                isPlaying = false;
+            } else {
+                if (!layer || !layer._frames) return;
+
+                document.getElementById('playBtn').innerText = "⏸";
+                isPlaying = true;
+
+                animInterval = setInterval(() => {
+                    currentIndex++;
+                    if (currentIndex >= layer._frames.length) currentIndex = 0;
+
+                    document.getElementById('timeSlider').value = currentIndex;
+                    layer._loadFrame(currentIndex);
+                }, 100); // 10 FPS
+            }
+        }
+
+        function seek(val) {
+            currentIndex = parseInt(val);
+            map.eachLayer(l => {
+                if (l._loadFrame) l._loadFrame(currentIndex);
+            });
+        }
+    </script>
+</body>
+
+</html>
