@@ -9,3 +9,5 @@ grib_139_steps
 *.npy
 .env
 *.csv
+backend
+*/__pycache__
